@@ -1,17 +1,24 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License. See License.txt in the project root for license information.
 
-using Microsoft.Azure.Management.Compute.Fluent;
-using Microsoft.Azure.Management.Compute.Fluent.Models;
-using Microsoft.Azure.Management.Fluent;
-using Microsoft.Azure.Management.Network.Fluent;
-using Microsoft.Azure.Management.Network.Fluent.Models;
-using Microsoft.Azure.Management.ResourceManager.Fluent;
-using Microsoft.Azure.Management.ResourceManager.Fluent.Core;
-using Microsoft.Azure.Management.Samples.Common;
-using Renci.SshNet;
+using Azure.Core;
+using Azure.Identity;
+using Azure.ResourceManager;
+using Azure.ResourceManager.Models;
+using Azure.ResourceManager.Compute;
+using Azure.ResourceManager.ManagedServiceIdentities;
+using Azure.ResourceManager.Resources;
+using Azure.ResourceManager.Compute.Models;
+using Azure.ResourceManager.Samples.Common;
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using Azure.ResourceManager.Network.Models;
+using Azure.ResourceManager.Network;
+using Azure;
+using Azure.ResourceManager.Storage;
 
 namespace ManageManagedDisks
 {
@@ -21,9 +28,9 @@ namespace ManageManagedDisks
          * This is sample will not be published, this is just to ensure out blog is honest.
          */
 
-        public static void RunSample(IAzure azure)
+        public static void RunSample(ArmClient client)
         {
-            var region = Region.USEast;
+            var region = AzureLocation.USEast;
             var rgName = Utilities.CreateRandomName("rgCOMV");
             var userName = Utilities.CreateUsername();
             var sshkey = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCfSPC2K7LZcFKEO+/t3dzmQYtrJFZNxOsbVgOVKietqHyvmYGHEC0J2wPdAqQ/63g/hhAEFRoyehM+rbeDri4txB3YFfnOK58jqdkyXzupWqXzOrlKY4Wz9SKjjN765+dqUITjKRIaAip1Ri137szRg71WnrmdP3SphTRlCx1Bk2nXqWPsclbRDCiZeF8QOTi4JqbmJyK5+0UqhqYRduun8ylAwKKQJ1NJt85sYIHn9f1Rfr6Tq2zS0wZ7DHbZL+zB5rSlAr8QyUdg/GQD+cmSs6LvPJKL78d6hMGk84ARtFo4A79ovwX/Fj01znDQkU6nJildfkaolH2rWFG/qttD azjava@javalib.Com";
@@ -35,8 +42,8 @@ namespace ManageManagedDisks
 
                 Utilities.Log("Creating VM [with an implicit Managed OS disk and explicit Managed data disk]");
 
-                var linuxVM1Name = SdkContext.RandomResourceName("vm" + "-", 18);
-                var linuxVM1Pip = SdkContext.RandomResourceName("pip" + "-", 18);
+                var linuxVM1Name = Utilities.CreateRandomName("vm" + "-");
+                var linuxVM1Pip = Utilities.CreateRandomName("pip" + "-");
                 var linuxVM1 = azure.VirtualMachines
                         .Define(linuxVM1Name)
                         .WithRegion(region)
