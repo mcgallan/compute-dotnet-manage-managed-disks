@@ -28,6 +28,8 @@ namespace ManageManagedDisks
             var password = Utilities.CreatePassword();
             var publicIpDnsLabel = Utilities.CreateRandomName("pip" + "-");
             var networkName = Utilities.CreateRandomName("VirtualNetwork_");
+            var vmssNetworkConfigurationName = Utilities.CreateRandomName("networkConfiguration");
+            var ipConfigurationName = Utilities.CreateRandomName("ipconfigruation");
             var sshKey = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCfSPC2K7LZcFKEO+/t3dzmQYtrJFZNxOsbVgOVKietqHyvmYGHEC0J2wPdAqQ/63g/hhAEFRoyehM+rbeDri4txB3YFfnOK58jqdkyXzupWqXzOrlKY4Wz9SKjjN765+dqUITjKRIaAip1Ri137szRg71WnrmdP3SphTRlCx1Bk2nXqWPsclbRDCiZeF8QOTi4JqbmJyK5+0UqhqYRduun8ylAwKKQJ1NJt85sYIHn9f1Rfr6Tq2zS0wZ7DHbZL+zB5rSlAr8QyUdg/GQD+cmSs6LvPJKL78d6hMGk84ARtFo4A79ovwX/Fj01znDQkU6nJildfkaolH2rWFG/qttD azjava@javalib.Com";
             var lro = await client.GetDefaultSubscription().GetResourceGroups().CreateOrUpdateAsync(Azure.WaitUntil.Completed, rgName, new ResourceGroupData(AzureLocation.EastUS));
             var resourceGroup = lro.Value;
@@ -152,22 +154,84 @@ namespace ManageManagedDisks
                 Utilities.Log("Creating VMSS [with implicit managed OS disks and explicit managed data disks]");
 
                 var vmScaleSetName = Utilities.CreateRandomName("vmss" + "-");
-                var vmScaleSet = azure.VirtualMachineScaleSets
-                        .Define(vmScaleSetName)
-                        .WithRegion(region)
-                        .WithExistingResourceGroup(rgName)
-                        .WithSku(VirtualMachineScaleSetSkuTypes.StandardD5v2)
-                        .WithExistingPrimaryNetworkSubnet(PrepareNetwork(azure, region, rgName), "subnet1")
-                        .WithExistingPrimaryInternetFacingLoadBalancer(PrepareLoadBalancer(azure, region, rgName))
-                        .WithoutPrimaryInternalLoadBalancer()
-                        .WithPopularLinuxImage(KnownLinuxVirtualMachineImage.UbuntuServer16_04_Lts)
-                        .WithRootUsername(Utilities.CreateUsername())
-                        .WithSsh(sshkey)
-                        .WithNewDataDisk(100)
-                        .WithNewDataDisk(100, 1, CachingTypes.ReadWrite)
-                        .WithNewDataDisk(100, 2, CachingTypes.ReadOnly)
-                        .WithCapacity(3)
-                        .Create();
+                var vmScaleSetVMCollection = resourceGroup.GetVirtualMachineScaleSets();
+                var scaleSetData = new VirtualMachineScaleSetData(region)
+                {
+                    Sku = new ComputeSku()
+                    {
+                        Name = "VirtualMachineScaleSetSkuTypes.StandardD5v2",
+                        Capacity = 3,
+                    },
+                    VirtualMachineProfile = new VirtualMachineScaleSetVmProfile()
+                    {
+                        OSProfile = new VirtualMachineScaleSetOSProfile()
+                        {
+                            LinuxConfiguration = new LinuxConfiguration()
+                            {
+                                SshPublicKeys =
+                                {
+                                    new SshPublicKeyConfiguration()
+                                    {
+                                        KeyData = sshKey,
+                                        Path = $"/home/{userName}/.ssh/authorized_keys"
+                                    }
+                                }
+                            }
+                        },
+                        StorageProfile = new VirtualMachineScaleSetStorageProfile()
+                        {
+                            DataDisks =
+                            {
+                                new VirtualMachineScaleSetDataDisk(1, DiskCreateOptionType.FromImage)
+                                {
+                                    DiskSizeGB = 100,
+                                    Caching = CachingType.ReadWrite
+                                },
+                                new VirtualMachineScaleSetDataDisk(2, DiskCreateOptionType.FromImage)
+                                {
+                                    DiskSizeGB = 100,
+                                    Caching = CachingType.ReadOnly
+                                },
+                                new VirtualMachineScaleSetDataDisk(3, DiskCreateOptionType.Attach)
+                                {
+                                    DiskSizeGB = 100,
+                                },
+                            },
+                            ImageReference = new ImageReference()
+                            {
+                                Publisher = "Canonical",
+                                Offer = "UbuntuServer",
+                                Sku = "16.04-LTS",
+                                Version = "latest"
+                            }
+                        },
+                        NetworkProfile = new VirtualMachineScaleSetNetworkProfile()
+                        {
+                            NetworkInterfaceConfigurations =
+                           {
+                               new VirtualMachineScaleSetNetworkConfiguration(vmssNetworkConfigurationName)
+                               {
+                                   IPConfigurations =
+                                   {
+                                       new VirtualMachineScaleSetIPConfiguration(ipConfigurationName)
+                                       {
+                                           LoadBalancerBackendAddressPools =
+                                           {
+                                               new Azure.ResourceManager.Resources.Models.WritableSubResource()
+                                               {
+                                                   Id = PrepareLoadBalancer(region, resourceGroup).Id
+                                               }
+                                           },
+                                           SubnetId = PrepareNetwork(region, resourceGroup).Id,
+                                       }
+                                   }
+                               }
+                           }
+                        },
+                    },
+
+                };
+                var vmScaleSet = (await vmScaleSetVMCollection.CreateOrUpdateAsync(WaitUntil.Completed, vmScaleSetName, scaleSetData)).Value;
 
                 Utilities.Log("Created VMSS [with implicit managed OS disks and explicit managed data disks]");
 
@@ -403,7 +467,7 @@ namespace ManageManagedDisks
                         }
                     },
                 };
-                var virtualMachineResource4 = vmCollection.CreateOrUpdate(WaitUntil.Completed, linuxVmName4, linuxVmdata4).Value;
+                var linuxVM4 = vmCollection.CreateOrUpdate(WaitUntil.Completed, linuxVmName4, linuxVmdata4).Value;
 
                 Utilities.Log("Created VM [by attaching un-managed disk]");
 
@@ -442,12 +506,14 @@ namespace ManageManagedDisks
 
                 // Create a managed disk from the managed snapshot for the OS disk
                 var managedNewOSDiskName = Utilities.CreateRandomName("dsk" + "-");
-                var newOSDisk = azure.Disks.Define(managedNewOSDiskName)
-                        .WithRegion(region)
-                        .WithExistingResourceGroup(rgName)
-                        .WithLinuxFromSnapshot(osSnapshot)
-                        .WithSizeInGB(100)
-                        .Create();
+                var newOSDisk = new ManagedDiskData(region)
+                {
+                    CreationData = new DiskCreationData(DiskCreateOption.Copy)
+                    {
+                        SourceResourceId = new ResourceIdentifier(osSnapshot.Id),
+                    },
+                    DiskSizeGB = 100,
+                };
 
                 Utilities.Log("Created managed OS disk [from snapshot]");
 
@@ -455,12 +521,17 @@ namespace ManageManagedDisks
 
                 // Create a managed snapshot for a data disk
                 var managedDataDiskSnapshotName = Utilities.CreateRandomName("dsk" + "-");
-                var dataSnapshot = azure.Snapshots.Define(managedDataDiskSnapshotName)
-                        .WithRegion(region)
-                        .WithExistingResourceGroup(rgName)
-                        .WithDataFromDisk(dataDisks[0])
-                        .WithSku(DiskSkuTypes.StandardLRS)
-                        .Create();
+                var dataSnapshot = new SnapshotData(region)
+                {
+                    Sku = new SnapshotSku()
+                    {
+                        Name = "DiskSkuTypes.StandardLRS"
+                    },
+                    CreationData = new DiskCreationData(DiskCreateOption.Copy)
+                    {
+                        SourceResourceId = new ResourceIdentifier(dataDisks[0].Name)
+                    }
+                };
 
                 Utilities.Log("Created managed data snapshot [from managed data disk]");
 
@@ -468,28 +539,69 @@ namespace ManageManagedDisks
 
                 // Create a managed disk from the managed snapshot for the data disk
                 var managedNewDataDiskName = Utilities.CreateRandomName("dsk" + "-");
-                var newDataDisk = azure.Disks.Define(managedNewDataDiskName)
-                        .WithRegion(region)
-                        .WithExistingResourceGroup(rgName)
-                        .WithData()
-                        .FromSnapshot(dataSnapshot)
-                        .Create();
+                var newDataDiskData = new ManagedDiskData(region)
+                {
+                    CreationData = new DiskCreationData(DiskCreateOption.Copy)
+                    {
+                        SourceResourceId = new ResourceIdentifier(dataSnapshot.Id)
+                    }
+                };
+                var newDataDisk = (await diskCollection.CreateOrUpdateAsync(WaitUntil.Completed, managedNewDataDiskName, newDataDiskData)).Value;
 
                 Utilities.Log("Created managed data disk [from managed snapshot]");
 
                 Utilities.Log("Creating VM [with specialized OS managed disk]");
 
                 var linuxVm6Name = Utilities.CreateRandomName("vm" + "-");
-                var linuxVM6 = azure.VirtualMachines.Define(linuxVm6Name)
-                        .WithRegion(region)
-                        .WithExistingResourceGroup(rgName)
-                        .WithNewPrimaryNetwork("10.0.0.0/28")
-                        .WithPrimaryPrivateIPAddressDynamic()
-                        .WithoutPrimaryPublicIPAddress()
-                        .WithSpecializedOSDisk(newOSDisk, OperatingSystemTypes.Linux)
-                        .WithExistingDataDisk(newDataDisk)
-                        .WithSize(VirtualMachineSizeTypes.Parse("Standard_D2a_v4"))
-                        .Create();
+
+                Utilities.Log("Creating VM [by attaching un-managed disk]");
+                var linuxVmdata6 = new VirtualMachineData(AzureLocation.EastUS)
+                {
+                    HardwareProfile = new VirtualMachineHardwareProfile()
+                    {
+                        VmSize = "Standard_D2a_v4"
+                    },
+                    OSProfile = new VirtualMachineOSProfile()
+                    {
+                        ComputerName = linuxComputerName,
+                        LinuxConfiguration = new LinuxConfiguration()
+                        {
+                        }
+                    },
+                    NetworkProfile = new VirtualMachineNetworkProfile()
+                    {
+                        NetworkInterfaces =
+                        {
+                            new VirtualMachineNetworkInterfaceReference()
+                            {
+                                Id = nic.Id,
+                                Primary = true,
+                            }
+                        }
+                    },
+                    StorageProfile = new VirtualMachineStorageProfile()
+                    {
+                        OSDisk = new VirtualMachineOSDisk(DiskCreateOptionType.Attach)
+                        {
+                            OSType = SupportedOperatingSystemType.Linux,
+                            ManagedDisk = new VirtualMachineManagedDisk()
+                            {
+                                DiskEncryptionSetId = newOSDisk.Id,
+                            }
+                        },
+                        DataDisks =
+                        {
+                            new VirtualMachineDataDisk(1, DiskCreateOptionType.Attach)
+                            {
+                                ManagedDisk = new VirtualMachineManagedDisk()
+                                {
+                                   DiskEncryptionSetId = newDataDisk.Id
+                                }
+                            }
+                        }
+                    },
+                };
+                var linuxVM6 = vmCollection.CreateOrUpdate(WaitUntil.Completed, linuxVm6Name, linuxVmdata6).Value;
 
                 Utilities.Log("Created VM [with specialized OS managed disk]");
 
@@ -498,32 +610,63 @@ namespace ManageManagedDisks
                 Utilities.Log("Creating VM [with un-managed disk for migration]");
 
                 var linuxVM7Name = Utilities.CreateRandomName("vm" + "-");
-                var linuxVM7Pip = Utilities.CreateRandomName("pip" + "-");
-                var linuxVM7 = azure.VirtualMachines.Define(linuxVM7Name)
-                        .WithRegion(region)
-                        .WithNewResourceGroup(rgName)
-                        .WithNewPrimaryNetwork("10.0.0.0/28")
-                        .WithPrimaryPrivateIPAddressDynamic()
-                        .WithNewPrimaryPublicIPAddress(linuxVM7Pip)
-                        .WithPopularLinuxImage(KnownLinuxVirtualMachineImage.UbuntuServer16_04_Lts)
-                        .WithRootUsername(Utilities.CreateUsername())
-                        .WithSsh(sshkey)
-                        .WithUnmanagedDisks() // uses storage accounts
-                        .WithNewUnmanagedDataDisk(100)
-                        .WithSize(VirtualMachineSizeTypes.Parse("Standard_D2a_v4"))
-                        .Create();
+                var linuxVmdata7 = new VirtualMachineData(AzureLocation.EastUS)
+                {
+                    HardwareProfile = new VirtualMachineHardwareProfile()
+                    {
+                        VmSize = "Standard_D2a_v4"
+                    },
+                    OSProfile = new VirtualMachineOSProfile()
+                    {
+                        ComputerName = linuxComputerName,
+                        LinuxConfiguration = new LinuxConfiguration()
+                        {
+                            SshPublicKeys =
+                                {
+                                    new SshPublicKeyConfiguration()
+                                    {
+                                        KeyData = sshKey,
+                                        Path = $"/home/{userName}/.ssh/authorized_keys"
+                                    }
+                                }
+                        }
+                    },
+                    NetworkProfile = new VirtualMachineNetworkProfile()
+                    {
+                        NetworkInterfaces =
+                        {
+                            new VirtualMachineNetworkInterfaceReference()
+                            {
+                                Id = nic.Id,
+                                Primary = true,
+                            }
+                        }
+                    },
+                    StorageProfile = new VirtualMachineStorageProfile()
+                    {
+                        ImageReference = new ImageReference()
+                        {
+                            Publisher = "Canonical",
+                            Offer = "UbuntuServer",
+                            Sku = "16.04-LTS",
+                            Version = "latest",
+                            CommunityGalleryImageId = imageResource.Id,
+                        },
+                    },
+                };
+                var linuxVM7 = vmCollection.CreateOrUpdate(WaitUntil.Completed, linuxVM7Name, linuxVmdata7).Value;
 
                 Utilities.Log("Created VM [with un-managed disk for migration]");
 
                 Utilities.Log("De-allocating VM :" + linuxVM7.Id);
 
-                linuxVM7.Deallocate();
+                await linuxVM7.DeallocateAsync(WaitUntil.Completed);
 
                 Utilities.Log("De-allocated VM :" + linuxVM7.Id);
 
                 Utilities.Log("Migrating VM");
 
-                linuxVM7.ConvertToManaged();
+                await linuxVM7.ConvertToManagedDisksAsync(WaitUntil.Completed);
 
                 Utilities.Log("Migrated VM");
             }
@@ -857,9 +1000,9 @@ namespace ManageManagedDisks
             return virtualNetwork;
         }
 
-        private static ILoadBalancer PrepareLoadBalancer(IAzure azure, Region region, string rgName)
+        private static LoadBalancerResource PrepareLoadBalancer(AzureLocation region, ResourceGroupResource resourceGroup)
         {
-            var loadBalancerName1 = SdkContext.RandomResourceName("intlb" + "-", 18);
+            var loadBalancerName1 = Utilities.CreateRandomName("intlb" + "-");
             var frontendName = loadBalancerName1 + "-FE1";
             var backendPoolName1 = loadBalancerName1 + "-BAP1";
             var backendPoolName2 = loadBalancerName1 + "-BAP2";
@@ -871,57 +1014,78 @@ namespace ManageManagedDisks
             var natPool60XXto23 = "natPool60XXto23";
             var publicIpName = "pip-" + loadBalancerName1;
 
-            var publicIpAddress = azure.PublicIPAddresses.Define(publicIpName)
-                    .WithRegion(region)
-                    .WithExistingResourceGroup(rgName)
-                    .WithLeafDomainLabel(publicIpName)
-                .Create();
-            var loadBalancer = azure.LoadBalancers.Define(loadBalancerName1)
-                    .WithRegion(region)
-                    .WithExistingResourceGroup(rgName)
-                    // Add two rules that uses above backend and probe
-                    .DefineLoadBalancingRule(httpLoadBalancingRule)
-                        .WithProtocol(TransportProtocol.Tcp)
-                        .FromFrontend(frontendName)
-                        .FromFrontendPort(80)
-                        .ToBackend(backendPoolName1)
-                        .WithProbe(httpProbe)
-                        .Attach()
-                    .DefineLoadBalancingRule(httpsLoadBalancingRule)
-                        .WithProtocol(TransportProtocol.Tcp)
-                        .FromFrontend(frontendName)
-                        .FromFrontendPort(443)
-                        .ToBackend(backendPoolName2)
-                        .WithProbe(httpsProbe)
-                        .Attach()
-                    // Add nat pools to enable direct VM connectivity for
-                    //  SSH to port 22 and TELNET to port 23
-                    .DefineInboundNatPool(natPool50XXto22)
-                        .WithProtocol(TransportProtocol.Tcp)
-                        .FromFrontend(frontendName)
-                        .FromFrontendPortRange(5000, 5099)
-                        .ToBackendPort(22)
-                        .Attach()
-                    .DefineInboundNatPool(natPool60XXto23)
-                        .WithProtocol(TransportProtocol.Tcp)
-                        .FromFrontend(frontendName)
-                        .FromFrontendPortRange(6000, 6099)
-                        .ToBackendPort(23)
-                        .Attach()
-                    // Explicitly define the frontend
-                    .DefinePublicFrontend(frontendName)
-                        .WithExistingPublicIPAddress(publicIpAddress)
-                        .Attach()
-                    // Add two probes one per rule
-                    .DefineHttpProbe(httpProbe)
-                        .WithRequestPath("/")
-                        .WithPort(80)
-                        .Attach()
-                    .DefineHttpProbe(httpsProbe)
-                        .WithRequestPath("/")
-                        .WithPort(443)
-                        .Attach()
-                    .Create();
+            var loadBalancerCollection = resourceGroup.GetLoadBalancers();
+            var loadBalancerData = new LoadBalancerData()
+            {
+                Location = region,
+                LoadBalancingRules =
+                    {
+                        new LoadBalancingRuleData()
+                        {
+                            Name = httpLoadBalancingRule,
+                            Protocol = LoadBalancingTransportProtocol.Tcp,
+                            FrontendPort = 80,
+                            ProbeId = new ResourceIdentifier(httpProbe),
+                            BackendAddressPools =
+                            {
+                                new Azure.ResourceManager.Resources.Models.WritableSubResource()
+                                {
+                                    Id = new ResourceIdentifier(backendPoolName1)
+                                }
+                            }
+                        },
+                        new LoadBalancingRuleData()
+                        {
+                            Name= httpsLoadBalancingRule,
+                            Protocol= LoadBalancingTransportProtocol.Tcp,
+                            BackendPort = 443,
+                            ProbeId = new ResourceIdentifier(httpsProbe),
+                            BackendAddressPools =
+                            {
+                                new Azure.ResourceManager.Resources.Models.WritableSubResource()
+                                {
+                                    Id = new ResourceIdentifier(backendPoolName2)
+                                }
+                            }
+                        }
+                    },
+                // Add nat pools to enable direct VM connectivity for
+                //  SSH to port 22 and TELNET to port 23
+                InboundNatRules =
+                    {
+                        new InboundNatRuleData()
+                        {
+                            Name = natPool50XXto22,
+                            Protocol= LoadBalancingTransportProtocol.Tcp,
+                            BackendPort = 22,
+                            FrontendPortRangeStart = 5000,
+                            FrontendPortRangeEnd = 5099,
+                        },
+                        new InboundNatRuleData()
+                        {
+                            Name = natPool60XXto23,
+                            Protocol= LoadBalancingTransportProtocol.Tcp,
+                            BackendPort = 23,
+                            FrontendPortRangeStart = 6000,
+                            FrontendPortRangeEnd = 6099,
+                        }
+                    },
+                // Add two probes one per rule
+                Probes =
+                    {
+                        new ProbeData()
+                        {
+                            RequestPath = "/",
+                            Port = 80,
+                        },
+                        new ProbeData()
+                        {
+                            RequestPath = "/",
+                            Port = 443,
+                        }
+                    }
+            };
+            var loadBalancer = loadBalancerCollection.CreateOrUpdate(Azure.WaitUntil.Completed, loadBalancerName1, loadBalancerData).Value;
             return loadBalancer;
         }
     }

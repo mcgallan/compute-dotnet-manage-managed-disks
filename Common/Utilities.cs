@@ -236,6 +236,5 @@ namespace Azure.ResourceManager.Samples.Common
         {
             return string.Join(", ", collection);
         }
-            var backoffTime = 30 * 1000;
     }
 }
